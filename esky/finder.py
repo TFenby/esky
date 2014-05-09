@@ -5,7 +5,7 @@
   esky.finder:  VersionFinder implementations for esky
 
 This module provides the default VersionFinder implementations for esky. The
-abstract base class "VersionFinder" defines the expected interface, while 
+abstract base class "VersionFinder" defines the expected interface, while
 "DefaultVersionFinder" provides a simple default implementation that hits a
 specified URL to look for new versions.
 
@@ -207,7 +207,7 @@ class DefaultVersionFinder(VersionFinder):
         return self.version_graph.get_versions(app.version)
 
     def fetch_version_iter(self,app,version):
-        #  There's always the possibility that a file fails to download or 
+        #  There's always the possibility that a file fails to download or
         #  that a patch fails to apply.  _fetch_file_iter and _prepare_version
         #  will remove such files from the version graph; we loop until we find
         #  a patch path that works, or we run out of options.
@@ -322,7 +322,7 @@ class DefaultVersionFinder(VersionFinder):
                     patches = path[1:]
                 # TODO: remove compatability hooks for ESKY_APPDATA_DIR="".
                 # If a patch fails to apply because we've put an appdata dir
-                # where it doesn't expect one, try again with old layout. 
+                # where it doesn't expect one, try again with old layout.
                 for _ in xrange(2):
                     #  Apply any patches in turn.
                     for (patchfile,patchurl) in patches:
@@ -439,6 +439,79 @@ class DefaultVersionFinder(VersionFinder):
         return os.path.join(self._workdir(app,"ready"),version)
 
 
+class DropboxVersionFinder(DefaultVersionFinder):
+    """Simple extension of DefaultVersionFinder that downloads from Dropbox
+    """
+    def _get_real_dropbox_link(self, url):
+        """Takes a dropbox file landing page URL and returns the actual download URL"""
+        # whuteva
+        link_re = r'"(https://dl.dropboxusercontent.com/.*?)"'
+
+        df = self.open_url(url)
+        try:
+            html = df.read().decode("utf-8")
+        finally:
+            df.close()
+
+        found = re.search(link_re, html)
+        if not found:
+            raise Exception("Couldn't get good DB link")
+
+        return found.group(1)
+
+    def _fetch_file_iter(self,app,url):
+        nm = os.path.basename(urlparse(url).path)
+        outfilenm = os.path.join(self._workdir(app,"downloads"),nm)
+        if not os.path.exists(outfilenm):
+            try:
+                #infile = self.open_url(urljoin(self.download_url,url))
+                infile = self.open_url(self._get_real_dropbox_link(url))
+                outfile_size = 0
+                # The to determine size of download, so that we can
+                # detect corrupted or truncated downloads.
+                try:
+                    infile_size = infile.size
+                except AttributeError:
+                    try:
+                        fh = infile.fileno()
+                    except AttributeError:
+                        infile_size = None
+                    else:
+                        infile_size = os.fstat(fh).st_size
+                # Read it into a temporary file, then rename into place.
+                try:
+                    partfilenm = outfilenm + ".part"
+                    partfile = open(partfilenm,"wb")
+                    try:
+                        data = infile.read(1024*64)
+                        while data:
+                            yield {"status": "downloading",
+                                   "size": infile_size,
+                                   "received": partfile.tell(),
+                            }
+                            partfile.write(data)
+                            outfile_size += len(data)
+                            data = infile.read(1024*64)
+                        if infile_size is not None:
+                            if outfile_size != infile_size:
+                                err = "corrupted download: %s" % (url,)
+                                raise IOError(err)
+                    except Exception:
+                        partfile.close()
+                        os.unlink(partfilenm)
+                        raise
+                    else:
+                        partfile.close()
+                        really_rename(partfilenm,outfilenm)
+                finally:
+                    infile.close()
+            except Exception as e:
+                # Something went wrong.  To avoid infinite looping, we
+                # must remove that file from the link graph.
+                self.version_graph.remove_all_links(url)
+                raise
+        yield {"status":"ready","path":outfilenm}
+
 class LocalVersionFinder(DefaultVersionFinder):
     """VersionFinder that looks only in a local directory.
 
@@ -541,7 +614,7 @@ class VersionGraph(object):
                     best_costs[v] = cost + v_cost
                     best_paths[v] = best_paths[best] + [v_link]
         return best_paths
-                
+
     def _get_best_link(self,source,target):
         if source not in self._links:
             return (_inf,"")
